@@ -1,0 +1,72 @@
+# Virtual Environment
+venv/
+.venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# Project Specific
+ROOT/
+raw_pdfs/
+*.pdf
+inference_results/
+dataset_v2/
+trained_models/
+runs/
+yolo_dataset/
+
+# Model files
+*.pt
+*.pth
+*.weights
+
+# Test outputs
+*.json
+test_output/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
+logs/
