@@ -111,7 +111,7 @@ ROOT/
 
 - **Watermark Removal:** Automatic detection and removal of PDF watermarks
 - **Ink Detection:** Precise extraction of question content using morphological operations
-- **Vision API Integration:** Gemini 2.0 Flash for intelligent question parsing
+- **Vision API Integration:** Gemini 3 pro for intelligent question parsing
 - **Flexible Options:** Handles both text and image-based multiple choice options
 - **Answer Mapping:** Automatic matching of answers from answer key pages
 - **Batch Processing:** Process multiple papers sequentially with progress tracking
@@ -122,13 +122,13 @@ ROOT/
 - **Language:** Python 3.14
 - **PDF Processing:** PyMuPDF (fitz)
 - **Image Processing:** OpenCV (cv2), Pillow
-- **Vision API:** Google Generative AI (Gemini 2.0 Flash)
+- **Vision API:** Google Generative AI (Gemini Nano Banana Pro)
 - **Environment:** Python virtual environment (venv)
 - **Configuration:** python-dotenv
 
 ## Model Configuration
 
-- **Model:** `gemini-2.0-flash`
+- **Model:** `gemini-3-pro-image-preview`
 - **Vision Capability:** Full image analysis with OCR
 - **DPI:** 300 DPI for PDF-to-image conversion
 - **Response Format:** JSON with structured question/answer fields
