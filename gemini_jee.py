@@ -2,6 +2,7 @@ import os
 import json
 import re
 import time
+from datetime import datetime
 import cv2
 import numpy as np
 import fitz  # PyMuPDF
@@ -43,79 +44,13 @@ GARBAGE_PATTERNS = [
 ]
 
 
-# ==========================================
-# 2. VISION ENGINE: GAMMA WASH & SNAP
-# ==========================================
-def process_and_save_image(original_img, box_norm, save_path):
-    """
-    1. Gamma Correction: Washes out faint watermarks.
-    2. Global Ink Snap: Crops to the exact outer limits of the black pixels.
-    """
-    if not box_norm or len(box_norm) != 4:
-        return False
-
-    h_img, w_img, _ = original_img.shape
-    ymin, xmin, ymax, xmax = box_norm
-
-    # 1. LOOSE CROP (Capture a wide buffer)
-    # We grab MORE area to ensure we don't cut off labels like "Fig 1"
-    buffer = 50 
-    y1 = max(0, int((ymin / 1000) * h_img) - buffer)
-    x1 = max(0, int((xmin / 1000) * w_img) - buffer)
-    y2 = min(h_img, int((ymax / 1000) * h_img) + buffer)
-    x2 = min(w_img, int((xmax / 1000) * w_img) + buffer)
-
-    loose_crop = original_img[y1:y2, x1:x2]
-    if loose_crop.size == 0: return False
-
-    # 2. GAMMA WASH (The Magic Step)
-    # This lightens mid-tones (watermarks) to white, keeps shadows (ink) dark.
-    gamma = 2.0  # Higher = stronger washout of grey
-    invGamma = 1.0 / gamma
-    table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-    washed = cv2.LUT(loose_crop, table)
-
-    # 3. BINARY THRESHOLD
-    # Convert to gray
-    gray = cv2.cvtColor(washed, cv2.COLOR_BGR2GRAY)
-    # Strict threshold: Only very dark things (ink) stay.
-    # Any pixel > 180 brightness becomes White.
-    _, binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
-
-    # 4. GLOBAL BOUNDING BOX
-    # Instead of finding specific shapes (contours), we find ALL ink pixels.
-    coords = cv2.findNonZero(binary)
-    
-    if coords is not None:
-        x, y, w, h = cv2.boundingRect(coords)
-        
-        # If the found ink is too tiny (just noise/dust), ignore it
-        if w > 10 and h > 10:
-            # Add aesthetic padding
-            pad = 8
-            cy1 = max(0, y - pad)
-            cx1 = max(0, x - pad)
-            cy2 = min(loose_crop.shape[0], y + h + pad)
-            cx2 = min(loose_crop.shape[1], x + w + pad)
-            
-            final_crop = loose_crop[cy1:cy2, cx1:cx2]
-            
-            # Save the original quality crop (not the washed one)
-            cv2.imwrite(save_path, final_crop)
-            return True
-
-    # Fallback: If no ink found (rare), save the loose crop
-    cv2.imwrite(save_path, loose_crop)
-    return True
-
 # # ==========================================
-# # 2. VISION ENGINE: CROP & CLEAN
+# # 2. VISION ENGINE: GAMMA WASH & SNAP
 # # ==========================================
 # def process_and_save_image(original_img, box_norm, save_path):
 #     """
-#     1. Removes Watermarks (forces light grey -> white).
-#     2. Finds exact ink boundaries.
-#     3. Crops tightly around the ink.
+#     1. Gamma Correction: Washes out faint watermarks.
+#     2. Global Ink Snap: Crops to the exact outer limits of the black pixels.
 #     """
 #     if not box_norm or len(box_norm) != 4:
 #         return False
@@ -123,8 +58,9 @@ def process_and_save_image(original_img, box_norm, save_path):
 #     h_img, w_img, _ = original_img.shape
 #     ymin, xmin, ymax, xmax = box_norm
 
-#     # 1. LOOSE CROP (Capture a safe buffer area first)
-#     buffer = 35 
+#     # 1. LOOSE CROP (Capture a wide buffer)
+#     # We grab MORE area to ensure we don't cut off labels like "Fig 1"
+#     buffer = 50 
 #     y1 = max(0, int((ymin / 1000) * h_img) - buffer)
 #     x1 = max(0, int((xmin / 1000) * w_img) - buffer)
 #     y2 = min(h_img, int((ymax / 1000) * h_img) + buffer)
@@ -133,70 +69,135 @@ def process_and_save_image(original_img, box_norm, save_path):
 #     loose_crop = original_img[y1:y2, x1:x2]
 #     if loose_crop.size == 0: return False
 
-#     # 2. DIGITAL CLEANING (Remove Watermarks)
-#     # Convert to grayscale to check brightness
-#     gray = cv2.cvtColor(loose_crop, cv2.COLOR_BGR2GRAY)
-    
-#     # Threshold: Anything lighter than 200 (watermarks are usually ~210-230) becomes WHITE
-#     # Anything darker (ink is ~0-50) stays dark.
-#     # This creates a mask for the ink.
-#     _, ink_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+#     # 2. GAMMA WASH (The Magic Step)
+#     # This lightens mid-tones (watermarks) to white, keeps shadows (ink) dark.
+#     gamma = 2.0  # Higher = stronger washout of grey
+#     invGamma = 1.0 / gamma
+#     table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+#     washed = cv2.LUT(loose_crop, table)
 
-#     # 3. FIND BOUNDING BOX OF INK (Tight Crop)
-#     # Dilate slightly to connect broken lines (like dashed graphs)
-#     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-#     dilated_mask = cv2.dilate(ink_mask, kernel, iterations=2)
-    
-#     contours, _ = cv2.findContours(dilated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-#     final_crop = loose_crop # Default to loose crop if no contours found
-    
-#     if contours:
-#         # Find the super-box covering all ink contours
-#         min_x, min_y = float('inf'), float('inf')
-#         max_x, max_y = 0, 0
-#         found_ink = False
+#     # 3. BINARY THRESHOLD
+#     # Convert to gray
+#     gray = cv2.cvtColor(washed, cv2.COLOR_BGR2GRAY)
+#     # Strict threshold: Only very dark things (ink) stay.
+#     # Any pixel > 180 brightness becomes White.
+#     _, binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
 
-#         for cnt in contours:
-#             x, y, w, h = cv2.boundingRect(cnt)
-#             if w * h > 30: # Filter dust/noise
-#                 found_ink = True
-#                 min_x = min(min_x, x)
-#                 min_y = min(min_y, y)
-#                 max_x = max(max_x, x + w)
-#                 max_y = max(max_y, y + h)
-
-#         if found_ink:
+#     # 4. GLOBAL BOUNDING BOX
+#     # Instead of finding specific shapes (contours), we find ALL ink pixels.
+#     coords = cv2.findNonZero(binary)
+    
+#     if coords is not None:
+#         x, y, w, h = cv2.boundingRect(coords)
+        
+#         # If the found ink is too tiny (just noise/dust), ignore it
+#         if w > 10 and h > 10:
 #             # Add aesthetic padding
-#             pad = 5
-#             cy1 = max(0, min_y - pad)
-#             cx1 = max(0, min_x - pad)
-#             cy2 = min(loose_crop.shape[0], max_y + pad)
-#             cx2 = min(loose_crop.shape[1], max_x + pad)
+#             pad = 8
+#             cy1 = max(0, y - pad)
+#             cx1 = max(0, x - pad)
+#             cy2 = min(loose_crop.shape[0], y + h + pad)
+#             cx2 = min(loose_crop.shape[1], x + w + pad)
+            
 #             final_crop = loose_crop[cy1:cy2, cx1:cx2]
+            
+#             # Save the original quality crop (not the washed one)
+#             cv2.imwrite(save_path, final_crop)
+#             return True
 
-#     # 4. FINAL CLEAN & SAVE
-#     # We want to save a clean version where the background is pure white
-#     # Use the mask to force non-ink pixels to white
-    
-#     # Re-calculate mask for the FINAL tight crop
-#     gray_final = cv2.cvtColor(final_crop, cv2.COLOR_BGR2GRAY)
-#     _, clean_mask = cv2.threshold(gray_final, 200, 255, cv2.THRESH_BINARY) 
-#     # clean_mask: Background is White (255), Ink is Black (0) due to threshold logic
-#     # Actually: threshold(200, 255, BINARY) -> >200 is 255 (White), <200 is 0 (Black)
-    
-#     # Create white background image
-#     white_bg = np.ones_like(final_crop) * 255
-    
-#     # Copy only the dark pixels (ink) from original to white background
-#     # This effectively erases the light grey watermark
-#     # Usage: where mask is black (ink), use image; else use white
-#     final_clean_img = cv2.bitwise_or(final_crop, final_crop, mask=cv2.bitwise_not(clean_mask))
-#     # Invert logic: Make background white
-#     final_clean_img = np.where(clean_mask[..., None] == 255, 255, final_crop)
-
-#     cv2.imwrite(save_path, final_clean_img)
+#     # Fallback: If no ink found (rare), save the loose crop
+#     cv2.imwrite(save_path, loose_crop)
 #     return True
+
+# ==========================================
+# 2. VISION ENGINE: CROP & CLEAN
+# ==========================================
+def process_and_save_image(original_img, box_norm, save_path):
+    """
+    1. Removes Watermarks (forces light grey -> white).
+    2. Finds exact ink boundaries.
+    3. Crops tightly around the ink.
+    """
+    if not box_norm or len(box_norm) != 4:
+        return False
+
+    h_img, w_img, _ = original_img.shape
+    ymin, xmin, ymax, xmax = box_norm
+
+    # 1. LOOSE CROP (Capture a safe buffer area first)
+    buffer = 35 
+    y1 = max(0, int((ymin / 1000) * h_img) - buffer)
+    x1 = max(0, int((xmin / 1000) * w_img) - buffer)
+    y2 = min(h_img, int((ymax / 1000) * h_img) + buffer)
+    x2 = min(w_img, int((xmax / 1000) * w_img) + buffer)
+
+    loose_crop = original_img[y1:y2, x1:x2]
+    if loose_crop.size == 0: return False
+
+    # 2. DIGITAL CLEANING (Remove Watermarks)
+    # Convert to grayscale to check brightness
+    gray = cv2.cvtColor(loose_crop, cv2.COLOR_BGR2GRAY)
+    
+    # Threshold: Anything lighter than 200 (watermarks are usually ~210-230) becomes WHITE
+    # Anything darker (ink is ~0-50) stays dark.
+    # This creates a mask for the ink.
+    _, ink_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+
+    # 3. FIND BOUNDING BOX OF INK (Tight Crop)
+    # Dilate slightly to connect broken lines (like dashed graphs)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    dilated_mask = cv2.dilate(ink_mask, kernel, iterations=2)
+    
+    contours, _ = cv2.findContours(dilated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    final_crop = loose_crop # Default to loose crop if no contours found
+    
+    if contours:
+        # Find the super-box covering all ink contours
+        min_x, min_y = float('inf'), float('inf')
+        max_x, max_y = 0, 0
+        found_ink = False
+
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            if w * h > 30: # Filter dust/noise
+                found_ink = True
+                min_x = min(min_x, x)
+                min_y = min(min_y, y)
+                max_x = max(max_x, x + w)
+                max_y = max(max_y, y + h)
+
+        if found_ink:
+            # Add aesthetic padding
+            pad = 5
+            cy1 = max(0, min_y - pad)
+            cx1 = max(0, min_x - pad)
+            cy2 = min(loose_crop.shape[0], max_y + pad)
+            cx2 = min(loose_crop.shape[1], max_x + pad)
+            final_crop = loose_crop[cy1:cy2, cx1:cx2]
+
+    # 4. FINAL CLEAN & SAVE
+    # We want to save a clean version where the background is pure white
+    # Use the mask to force non-ink pixels to white
+    
+    # Re-calculate mask for the FINAL tight crop
+    gray_final = cv2.cvtColor(final_crop, cv2.COLOR_BGR2GRAY)
+    _, clean_mask = cv2.threshold(gray_final, 200, 255, cv2.THRESH_BINARY) 
+    # clean_mask: Background is White (255), Ink is Black (0) due to threshold logic
+    # Actually: threshold(200, 255, BINARY) -> >200 is 255 (White), <200 is 0 (Black)
+    
+    # Create white background image
+    white_bg = np.ones_like(final_crop) * 255
+    
+    # Copy only the dark pixels (ink) from original to white background
+    # This effectively erases the light grey watermark
+    # Usage: where mask is black (ink), use image; else use white
+    final_clean_img = cv2.bitwise_or(final_crop, final_crop, mask=cv2.bitwise_not(clean_mask))
+    # Invert logic: Make background white
+    final_clean_img = np.where(clean_mask[..., None] == 255, 255, final_crop)
+
+    cv2.imwrite(save_path, final_clean_img)
+    return True
 
 # ==========================================
 # 3. GEMINI EXTRACTION LOGIC
@@ -211,10 +212,15 @@ class DirectExtractor:
     def __init__(self, pdf_filename):
         self.pdf_path = os.path.join(INPUT_FOLDER, pdf_filename)
         self.doc = fitz.open(self.pdf_path)
-        self.set_dir = os.path.join(OUTPUT_ROOT, METADATA['prepmode'], METADATA['subject'], METADATA['set'])
+        
+        # Add timestamp to output directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.set_dir = os.path.join(OUTPUT_ROOT, METADATA['prepmode'], METADATA['subject'], f"{METADATA['set']}_{timestamp}")
+        
         os.makedirs(self.set_dir, exist_ok=True)
         self.final_json = []
         self.answer_key_map = {}
+        print(f"[OUTPUT] Saving to: {self.set_dir}")
 
     def clean_q_text(self, text):
         """Strips Question Numbers and Garbage."""
