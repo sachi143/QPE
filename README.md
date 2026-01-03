@@ -1,6 +1,6 @@
-# JEE Exam Paper Question Extraction
+# Exam Paper Question Extraction
 
-A Python-based pipeline for automated extraction of questions, options, and answers from JEE exam papers using Google Generative AI (Gemini Vision API).
+A Python-based pipeline for automated extraction of questions, options, and answers from JEE and NEET exam papers using Google Generative AI (Gemini Vision API).
 
 ## Overview
 
@@ -15,19 +15,19 @@ This project processes JEE Main and NEET exam papers (PDFs) to extract:
 
 ```
 touch_v2/
-├── venv/                          # Local Python virtual environment
-├── raw_pdfs/                      # Input exam papers
+├── venv/                           # Local Python virtual environment
+├── raw_pdfs/                       # Input exam papers
 │   └── JEE Prev Year QPs/
-│       ├── 2012-2025/            # Organized by year
-├── ROOT/                          # Extraction output
-│   └── JEE/Physics/               # Organized by subject
-├── .env                           # API keys & configuration (git-ignored)
-├── requirements.txt               # Python dependencies
-├── gemini_jee.py                 # Main extraction pipeline
+│       ├── 2012-2025/              # Organized by year
+├── ROOT/                           # Extraction output
+│   └── JEE/Physics/                # Organized by subject
+├── .env                            # API keys & configuration (git-ignored)
+├── requirements.txt                # Python dependencies
+├── gemini_jee.py                   # Main extraction pipeline
 ├── geminiv2.py                     # jee paper 
 ├── geminiv3.py                     # neet paper
-├── .gitignore                     # Git ignore file
-└── README.md                      # This file
+├── .gitignore                      # Git ignore file
+└── README.md                       # This file
 ```
 
 ## Setup
