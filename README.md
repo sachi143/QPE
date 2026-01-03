@@ -24,8 +24,8 @@ touch_v2/
 ├── .env                           # API keys & configuration (git-ignored)
 ├── requirements.txt               # Python dependencies
 ├── gemini_jee.py                 # Main extraction pipeline
-├──geminiv2.py                     # jee paper 
-├──geminiv3.py                     # neet paper
+├── geminiv2.py                     # jee paper 
+├── geminiv3.py                     # neet paper
 ├── .gitignore                     # Git ignore file
 └── README.md                      # This file
 ```
