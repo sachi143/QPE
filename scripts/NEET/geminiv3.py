@@ -14,12 +14,17 @@ from dotenv import load_dotenv
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-load_dotenv()
+
+# Resolve project root (2 levels up from scripts/NEET/)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
+
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Input/Output
-INPUT_FOLDER = r"raw_pdfs/NEET_PYQPs"
-OUTPUT_ROOT = "ROOT"
+# Input/Output (relative to project root)
+INPUT_FOLDER = os.path.join(PROJECT_ROOT, "raw_pdfs", "NEET_PYQPs")
+OUTPUT_ROOT = os.path.join(PROJECT_ROOT, "ROOT")
 
 # METADATA: strictly follows SET_NAME_NUMBER convention
 METADATA = {
@@ -54,6 +59,60 @@ MAX_RETRIES = 3
 # ==========================================
 # 2. HYBRID VISION ENGINE (Smart Snap & Clean)
 # ==========================================
+
+# Load Logo Templates for Rejection (located at project root)
+LOGO_TEMPLATES = []
+_logo_pw = os.path.join(PROJECT_ROOT, "logo_template.png")
+_logo_oswaal = os.path.join(PROJECT_ROOT, "logo_template_oswaal.png")
+if os.path.exists(_logo_pw):
+    LOGO_TEMPLATES.append(cv2.imread(_logo_pw, cv2.IMREAD_GRAYSCALE))
+if os.path.exists(_logo_oswaal):
+    LOGO_TEMPLATES.append(cv2.imread(_logo_oswaal, cv2.IMREAD_GRAYSCALE))
+
+def is_content_just_logo(img_bgr):
+    """
+    Detects if the image matches ANY known logo template or is faint watermark.
+    """
+    if img_bgr is None or img_bgr.size == 0: return True
+    
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    
+    # 1. Template Matching (Strict check for Known Logos)
+    if LOGO_TEMPLATES:
+        for template in LOGO_TEMPLATES:
+            try:
+                if template is None: continue
+                
+                h, w = gray.shape
+                th, tw = template.shape
+                
+                # Resize crop to match template size (simplistic approach for icons)
+                # Only if aspects are somewhat similar or crop is "square-ish" for PW
+                if h > 50 and w > 50:
+                    resized_crop = cv2.resize(gray, (tw, th))
+                    
+                    # Mean Squared Error
+                    err = np.sum((resized_crop.astype("float") - template.astype("float")) ** 2)
+                    err /= float(resized_crop.shape[0] * resized_crop.shape[1])
+                    
+                    # If error is low, it's the same image
+                    if err < 3000: # Heuristic threshold
+                        return True
+            except: pass
+
+    # 2. Heuristic Check (Backups for other logos/faint marks)
+    # Check for Deep Black Content (Ink)
+    black_mask = cv2.inRange(gray, 0, 120)
+    black_pixels = cv2.countNonZero(black_mask)
+    
+    total_pixels = gray.size
+    black_ratio = black_pixels / total_pixels
+    
+    # If hardly any black ink (< 0.5%) it's likely just noise/faint logo
+    if black_ratio < 0.005: 
+        return True 
+        
+    return False
 
 def get_fitz_rect(page, box_norm):
     """Converts Gemini 1000-scale box to PDF Point Rect."""
@@ -97,9 +156,28 @@ def extract_raw_image_if_exists(doc, page, box_norm, save_path):
         if best_image:
             base_image = doc.extract_image(best_image)
             pil_img = Image.open(io.BytesIO(base_image["image"]))
+            
+            # Fix Inverted Images (Black Background)
+            # Check if image is mostly black (mean < 127)
+            try:
+                img_np = np.array(pil_img)
+                if np.mean(img_np) < 127:
+                    # Invert to get White Background
+                    img_np = 255 - img_np
+                    pil_img = Image.fromarray(img_np)
+            except: pass
+            
+            # --- CRITICAL SAFETY CHECK: is this just a logo? ---
+            # Convert to BGR for CV2 check
+            try:
+                check_img_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                if is_content_just_logo(check_img_bgr):
+                     return False # REJECT LOGO
+            except: pass
+
             pil_img.save(save_path, format="PNG")
             return True
-
+            
     except Exception:
         pass 
     return False
@@ -123,6 +201,11 @@ def process_and_save_crop(original_img, box_norm, save_path):
     
     loose_crop = original_img[y1:y2, x1:x2]
     if loose_crop.size == 0: return False
+
+    # --- SAFETY CHECK: is this just a logo? ---
+    if is_content_just_logo(loose_crop):
+        return False # Reject logo-only crop
+
 
     # 2. SMART SNAP: Find Ink Contours
     # Convert to gray
@@ -190,20 +273,29 @@ def process_and_save_crop(original_img, box_norm, save_path):
 model = None 
 
 class DirectExtractor:
-    def __init__(self, pdf_filename, set_override=None, reference_override=None):
-        self.pdf_path = os.path.join(INPUT_FOLDER, pdf_filename)
-        self.doc = fitz.open(self.pdf_path)
+    def __init__(self, pdf_file, metadata=None):
+        self.pdf_file = pdf_file
         
-        # Override Metadata if provided
-        self.current_set = set_override if set_override else METADATA['set']
-        self.current_ref = reference_override if reference_override else METADATA['reference']
+        # Use provided metadata or fallback to global default
+        self.metadata = metadata if metadata else METADATA.copy()
         
-        # Strict Folder Structure
-        self.set_dir = os.path.join(OUTPUT_ROOT, METADATA['prepmode'], METADATA['subject'], self.current_set)
+        # Dynamically set current_set from metadata
+        self.current_set = self.metadata.get("set", METADATA["set"])
+        self.current_ref = self.metadata.get("reference", METADATA["reference"])
+        
+        # Use OUTPUT folder structure: ROOT/NEET/OUTPUT/<SET_NAME>
+        self.set_dir = os.path.join(OUTPUT_ROOT, self.metadata['prepmode'], "OUTPUT", self.current_set)
         self.quarantine_dir = os.path.join(self.set_dir, "_QUARANTINE")
         os.makedirs(self.set_dir, exist_ok=True)
         os.makedirs(self.quarantine_dir, exist_ok=True)
         
+        # Resolve PDF path: try INPUT_FOLDER, then absolute/relative
+        pdf_path = os.path.join(INPUT_FOLDER, pdf_file)
+        if not os.path.exists(pdf_path):
+             if os.path.exists(pdf_file):
+                 pdf_path = pdf_file
+             
+        self.doc = fitz.open(pdf_path)
         self.final_json = []
         self.answer_key_map = {}
         print(f"[OUTPUT] {self.set_dir}")
@@ -214,6 +306,16 @@ class DirectExtractor:
         for p in GARBAGE_PATTERNS: clean = re.sub(p, "", clean, flags=re.IGNORECASE)
         # Handle "Q1.", "1.", "1)", "(1)" prefixes
         return re.sub(r'^(Q\s*)?\d+[\.\)\s]+', '', clean.strip()).strip()
+
+    def clean_option_text(self, text):
+        """Remove option labels like (1), (A), 1., A., a), etc. from option text."""
+        if not text: return ""
+        clean = " ".join(text.strip().split())
+        # Remove patterns: (1), (A), (a), 1., A., a., 1), A), a), (i), (ii), etc.
+        clean = re.sub(r'^\s*[\(\[]?\s*([1-4]|[A-Da-d]|[ivxIVX]+)\s*[\)\]\.]\s*', '', clean)
+        # Also handle standalone letter/number at start: "A ", "1 ", etc.
+        clean = re.sub(r'^\s*([1-4]|[A-Da-d])\s+', '', clean)
+        return clean.strip()
 
     def get_gemini_analysis(self, pil_image):
         prompt = """
@@ -227,6 +329,19 @@ class DirectExtractor:
         - Detailed Explanations, Solutions, Hints (we ONLY want questions and options).
         - Answer Key tables at the end of the chapter (ignore them).
         
+        MATH FORMATTING (CRITICAL):
+        - Use LaTeX format for ALL mathematical expressions
+        - Wrap inline math in single $ delimiters: $x^2 + y^2 = r^2$
+        - Use LaTeX commands: $\frac{a}{b}$, $\sqrt{x}$, $\int_0^1$, $\sum_{n=1}^{\infty}$
+        - Subscripts: $a_1$, $x_n$ NOT a₁, xₙ
+        - Superscripts: $x^2$, $e^x$ NOT x², eˣ
+        - Greek letters: $\alpha$, $\beta$, $\pi$ NOT α, β, π
+        - Chemical formulas: $H_2O$, $CO_2$, $NaCl$
+        - Examples:
+          - "x² + y² = r²" → "$x^2 + y^2 = r^2$"
+          - "∫₀¹ f(x)dx" → "$\int_0^1 f(x) dx$"
+          - "H₂O" → "$H_2O$"
+        
         QUESTION NUMBER FORMATS (all valid):
         - "Q1", "q1", "Q.1", "1.", "1)", "(1)", "Question 1"
         - Extract just the NUMBER as "q_id" (e.g., "1", "45", "63")
@@ -236,17 +351,19 @@ class DirectExtractor:
         2. ASSERTION-REASON: 4 options (Both true, etc.). Treat as MCQ.
         3. NUMERICAL/FILL-IN-BLANK: No options, answer is a number. Set "options": [] and "question_type": "numerical"
         
-        OPTION FORMATS (all valid):
-        - "(A)", "(B)", "(C)", "(D)" 
-        - "A.", "B.", "C.", "D."
-        - "(1)", "(2)", "(3)", "(4)"
-        - "1.", "2.", "3.", "4."
-        - "a.", "b.", "c.", "d."
+        OPTION TEXT EXTRACTION:
+        - Extract ONLY the option content, WITHOUT any label prefix
+        - Remove labels like "(A)", "(1)", "A.", "1." from option text
+        - Example: If option shows "(A) 628", extract just "628"
+        - Example: If option shows "(1) 4 mC and 0.2 J", extract just "4 mC and 0.2 J"
         
         CRITICAL IMAGE RULES:
         1. "diagram_box" is ONLY for figures/diagrams in the QUESTION TEXT itself.
         2. If OPTIONS contain graphs/figures (common in Biology/Physics), provide SEPARATE "box" for EACH option.
         3. NEVER combine multiple option images into one diagram_box.
+        4. NEVER provide diagram_box for watermarks/logos like the circular \"PW\" logo - these are NOT diagrams!
+        5. If a question has only text (no actual figure), set diagram_box to null even if you see a watermark.
+        6. Valid diagrams include: circuits, graphs, chemical structures, biological diagrams, tables, flowcharts.
         
         OUTPUT FORMAT:
         {
@@ -277,9 +394,17 @@ class DirectExtractor:
         """
         for attempt in range(MAX_RETRIES):
             try:
+                # print(f"  [DEBUG] Sending to Gemini (Attempt {attempt+1})...")
                 response = model.generate_content([prompt, pil_image], generation_config={"response_mime_type": "application/json"})
-                return json.loads(response.text)
+                
+                # Clean JSON if needed (though response_mime_type handles most)
+                text = response.text.strip()
+                if text.startswith("```json"): text = text[7:-3]
+                elif text.startswith("```"): text = text[3:-3]
+                
+                return json.loads(text)
             except Exception as e:
+                # print(f"  [gemini_err] {e}")
                 time.sleep(1)
         return {"questions": []}
 
@@ -312,7 +437,7 @@ class DirectExtractor:
 
             final_q = {
                 "set": self.current_set,
-                "grade": METADATA['grade'],
+                "grade": self.metadata['grade'],
                 "question_no": q_num,
                 "question_type": q.get("question_type", "mcq"),  # mcq or numerical
                 "question_txt": self.clean_q_text(q.get("q_text", "")),
@@ -322,7 +447,7 @@ class DirectExtractor:
                 "image_question": "",
                 "image_option": [],
                 "validity": "Valid",
-                "prepmode": METADATA['prepmode']
+                "prepmode": self.metadata['prepmode']
             }
 
             # ---------------------------
@@ -336,18 +461,14 @@ class DirectExtractor:
                 # Priority 1: Raw Extract
                 success = extract_raw_image_if_exists(self.doc, page, q["diagram_box"], save_path)
                 # Priority 2: Smart Crop
-                # Priority 2: Smart Crop
                 if not success:
                     process_and_save_crop(cv2_img, q["diagram_box"], save_path)
                 
-                # --- REAL-TIME VALIDATION ---
-                if self.validate_image_content(save_path):
+                # CHECK IF FILE EXISTS (Logo check might have prevented saving)
+                if os.path.exists(save_path):
                     final_q["image_question"] = fname
                 else:
-                    print(f"  [QUARANTINE] Logo/Junk detected: {fname}")
-                    try: shutil.move(save_path, os.path.join(self.quarantine_dir, fname))
-                    except: pass
-                    final_q["image_question"] = None
+                    final_q["image_question"] = ""
 
             # ---------------------------
             # 2. OPTIONS HANDLING
@@ -383,22 +504,19 @@ class DirectExtractor:
                         if not extract_raw_image_if_exists(self.doc, page, opt_box, save_path):
                             process_and_save_crop(cv2_img, opt_box, save_path)
                         
-                        # --- REAL-TIME VALIDATION ---
-                        if self.validate_image_content(save_path):
+                        # CHECK IF FILE EXISTS
+                        if os.path.exists(save_path):
                             final_q["image_option"].append(fname)
                         else:
-                            print(f"  [QUARANTINE] Logo/Junk detected: {fname}")
-                            try: shutil.move(save_path, os.path.join(self.quarantine_dir, fname))
-                            except: pass
-                            # Fallback to text if available
-                            final_q["image_option"].append(self.clean_q_text(opt_text) if opt_text else "")
+                            # Fallback to pure text if logo was rejected
+                            final_q["image_option"].append(self.clean_option_text(opt_text) if opt_text else "")
 
                     else:
                         # Text option in a mixed question
-                        final_q["image_option"].append(self.clean_q_text(opt_text))
+                        final_q["image_option"].append(self.clean_option_text(opt_text))
                 else:
                     # TEXT ONLY MODE: Populate options[]
-                    final_q["options"].append(self.clean_q_text(opt_text))
+                    final_q["options"].append(self.clean_option_text(opt_text))
 
             self.final_json.append(final_q)
             print(f"  Saved Q{q_num}")
@@ -476,9 +594,8 @@ def initialize_gemini():
     print("[INFO] Gemini API initialized.")
 
 if __name__ == "__main__":
-    initialize_gemini()
-    PDF_FILE = "NEET_2025_PW.pdf"
-    if os.path.exists(os.path.join(INPUT_FOLDER, PDF_FILE)):
-        DirectExtractor(PDF_FILE).run()
-    else:
-        print("PDF not found.")
+    print("[INFO] Use batch_neet.py for batch processing.")
+    print("[INFO] This script provides DirectExtractor and initialize_gemini for import.")
+    print(f"[INFO] Project root: {PROJECT_ROOT}")
+    print(f"[INFO] Input folder: {INPUT_FOLDER}")
+    print(f"[INFO] Output root: {OUTPUT_ROOT}")

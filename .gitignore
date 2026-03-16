@@ -70,3 +70,13 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# IDE Configs
+.trunk/
+.vscode/
+
+
+# Client Deliverables
+documentation/
+JEE_Extraction_Delivery.zip
+
